@@ -43,6 +43,7 @@ For browser playback, volume control usually affects the browser process, such a
 
 ## Credits
 
+* Hashah2311 - original Taskbar Music Lounge concept and base work.
 * dav2010ID - fork maintenance, event-driven media handling, bug fixes, and per-app volume control.
 */
 // ==/WindhawkModReadme==

@@ -101,6 +101,11 @@ Main Windows APIs used:
 - Acrylic behavior can vary across Windows builds and themes.
 - The settings section in `mod.cpp` is the source of truth for Windhawk settings.
 
+## Credits
+
+- Hashah2311: original Taskbar Music Lounge concept and base work.
+- dav2010ID: fork maintenance, event-driven media handling, bug fixes, and per-app volume control.
+
 ## File Layout
 
 - `mod.cpp`: complete Windhawk mod implementation.
