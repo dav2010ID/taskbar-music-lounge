@@ -1,6 +1,8 @@
-# Taskbar Music Lounge
+# Taskbar Music Deck
 
 Native-style Windhawk tool mod that adds a compact music panel to the Windows 11 taskbar area. It shows current media metadata, album art, playback controls, and per-app volume control.
+
+Unique Windhawk mod id: `taskbar-music-deck`.
 
 ## Features
 
@@ -30,7 +32,7 @@ Native-style Windhawk tool mod that adds a compact music panel to the Windows 11
 4. Compile and enable the mod.
 5. Adjust the mod settings in Windhawk.
 
-The mod is configured for `explorer.exe` and runs as a Windhawk tool mod.
+The mod is configured for `explorer.exe` and runs as a Windhawk tool mod. For the official Windhawk mods repository, the file name should be `mods/taskbar-music-deck.wh.cpp`.
 
 ## Controls
 

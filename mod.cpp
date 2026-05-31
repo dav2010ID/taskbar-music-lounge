@@ -1,46 +1,49 @@
-// ==WindhawkMod==
-// @id              taskbar-music-lounge
-// @name            Taskbar Music Lounge
-// @description     A native-style music ticker with media controls.
-// @version         4.0.1
-// @author          dav2010id
-// @github          https://github.com/dav2010id
+﻿// ==WindhawkMod==
+// @id              taskbar-music-deck
+// @name            Taskbar Music Deck
+// @description     Event-driven taskbar music panel with GSMTC controls and per-app volume.
+// @version         1.0.0
+// @author          dav2010ID
+// @github          https://github.com/dav2010ID
 // @include         explorer.exe
 // @compilerOptions -lole32 -luuid -ldwmapi -lgdi32 -luser32 -lwindowsapp -lshcore -lgdiplus -lshell32
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
 /*
-# Taskbar Music Lounge
+# Taskbar Music Deck
 
-A media controller that uses Windows 11 native DWM styling for a seamless look.
+A compact Windows 11 taskbar media panel with album art, playback controls, and app-specific volume control.
 
-## 🚀 v3 vs v4: Major Architecture Shift
-| Feature | v3 (Legacy) | v4 (Current) |
-| :--- | :--- | :--- |
-| **Performance** | Polling Loop (High CPU wakeups) | **Event-Driven** (0% CPU when idle) |
-| **Smoothness** | 1-second delay on moves | **Instant** sync with Taskbar animations |
-| **Compatibility** | Chrome/Spotify only | **Universal** supports all media players |
-| **Visuals** | Square Art, Fixed Size | **Rounded Art**, 4K Scalable Icons, Acrylic Blur, Rounded Art |
-| **Behavior** | Always visible (Clunky) | **Smart Auto-Hide** Hides on fullscreen (Idle, Games, Taskbar Hide) |
+This fork uses the unique mod id `taskbar-music-deck` to avoid conflicts with other Taskbar Music Lounge variants.
 
-## ✨ Features
-* **Universal Support:** Smart scanning detects active playback from any app, not just the "focused" one.
-* **Album Art:** Displays current track cover art.
-* **Fullscreen Mode:** Hides automatically when running full-screen applications.
-* **Native Look:** Uses Windows 11 hardware-accelerated rounding and acrylic blur.
-* **Idle Timeout:** Optional setting to fade out the widget when music is paused for X seconds.
-* **Controls:** Play/Pause, Next, Previous.
-* **Volume:** Scroll over widget to adjust volume.
+## Features
 
+* **Event-driven media updates:** Uses Windows GSMTC events instead of constant polling.
+* **Media display:** Shows title, artist, and rounded album art.
+* **Playback controls:** Previous, play/pause, and next buttons.
+* **Safe controls:** Unsupported buttons are disabled based on GSMTC playback capabilities.
+* **Per-app volume:** Mouse wheel changes the active media app volume through the Windows audio mixer instead of changing the whole PC volume.
+* **Smart visibility:** Optional hiding for fullscreen/presentation mode, paused idle timeout, and taskbar auto-hide.
+* **Native Windows 11 look:** Acrylic background, rounded corners, DPI-aware positioning, and automatic light/dark text color.
+* **Long title support:** Smooth horizontal ticker for track names that do not fit.
 
-## ⚠️ Requirements
-* **Disable Widgets:** Taskbar Settings -> Widgets -> Off.
-* **Windows 11:** Required for rounded corners.
+## Controls
 
+* Left click previous/play/pause/next to control the current media session.
+* Scroll over the panel to change the current media app volume.
+
+For browser playback, volume control usually affects the browser process, such as Chrome, Edge, or Firefox. It does not control a single browser tab.
+
+## Requirements
+
+* Windows 11.
+* A media player or browser that exposes metadata through Windows Global System Media Transport Controls.
+* For best layout results, disable the default Widgets taskbar button if it overlaps the panel.
 
 ## Credits
-* Hashah2311 - Development, Design
+
+* dav2010ID - fork maintenance, event-driven media handling, bug fixes, and per-app volume control.
 */
 // ==/WindhawkModReadme==
 
@@ -980,7 +983,7 @@ void DrawMediaPanel(HDC hdc, int width, int height, const ModSettings& settings)
     int textMaxW = width - textX - 10;
     
     wstring fullText = state.title;
-    if (!state.artist.empty()) fullText += L" • " + state.artist;
+    if (!state.artist.empty()) fullText += L" вЂў " + state.artist;
 
     if (!g_FontFamily) {
         return;
@@ -1646,7 +1649,7 @@ void MediaThread() {
     WNDCLASSW wc{};
     wc.lpfnWndProc = MediaWndProc;
     wc.hInstance = GetModuleHandleW(NULL);
-    wc.lpszClassName = L"WindhawkMusicLounge_GSMTC";
+    wc.lpszClassName = L"WindhawkMusicDeck_GSMTC";
     wc.hCursor = LoadCursor(NULL, IDC_HAND);
     RegisterClassW(&wc);
 
@@ -1663,7 +1666,7 @@ void MediaThread() {
     if (CreateWindowInBand) {
         mediaWindow = CreateWindowInBand(
             WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            wc.lpszClassName, L"MusicLounge",
+            wc.lpszClassName, L"MusicDeck",
             WS_POPUP | WS_VISIBLE,
             0, 0, settings.width, settings.height,
             NULL, NULL, wc.hInstance, NULL,
@@ -1678,7 +1681,7 @@ void MediaThread() {
         Wh_Log(L"Falling back to CreateWindowEx");
         mediaWindow = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            wc.lpszClassName, L"MusicLounge",
+            wc.lpszClassName, L"MusicDeck",
             WS_POPUP | WS_VISIBLE,
             0, 0, settings.width, settings.height,
             NULL, NULL, wc.hInstance, NULL
@@ -1717,7 +1720,7 @@ unique_ptr<std::thread> g_pMediaEventsThread;
 
 // --- CALLBACKS ---
 BOOL WhTool_ModInit() {
-    SetCurrentProcessExplicitAppUserModelID(L"taskbar-music-lounge");
+    SetCurrentProcessExplicitAppUserModelID(L"taskbar-music-deck");
     LoadSettings(); 
 
     if (!g_GdiplusStarted) {
