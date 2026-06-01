@@ -221,6 +221,7 @@ HANDLE g_MediaRefreshEvent = nullptr;
 HANDLE g_MediaStopEvent = nullptr;
 HANDLE g_MediaCommandVerifyTimer = nullptr;
 atomic<bool> g_MediaUiRefreshPending{false};
+atomic<int> g_VolumeOverlayPercent{-1};
 int g_HoverState = 0; 
 HWINEVENTHOOK g_TaskbarHook = nullptr; 
 UINT g_TaskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
@@ -259,6 +260,7 @@ uint64_t g_LastSeenMediaRevision = 0;
 
 #define IDT_VISIBILITY      1001
 #define IDT_ANIMATION       1002
+#define IDT_VOLUME_OVERLAY  1003
 #define APP_WM_CLOSE        (WM_APP + 100)
 #define APP_WM_REPOSITION   (WM_APP + 101)
 #define APP_WM_MEDIA_REFRESH (WM_APP + 102)
@@ -805,7 +807,7 @@ bool AudioSessionMatchesSource(
     return !sourceLower.empty() && sessionText.find(sourceLower) != wstring::npos;
 }
 
-bool ChangeActiveMediaSessionVolume(short wheelDelta) {
+bool ChangeActiveMediaSessionVolume(short wheelDelta, int* newVolumePercent = nullptr) {
     ScopedComInit comInit;
     if (!comInit.CanUseCom()) {
         return false;
@@ -902,6 +904,9 @@ bool ChangeActiveMediaSessionVolume(short wheelDelta) {
             if (SUCCEEDED(simpleVolume->SetMasterVolume(newVolume, nullptr))) {
                 if (newVolume > 0.0f) {
                     simpleVolume->SetMute(FALSE, nullptr);
+                }
+                if (newVolumePercent) {
+                    *newVolumePercent = (int)(newVolume * 100.0f + 0.5f);
                 }
                 changedAny = true;
             }
@@ -1429,6 +1434,42 @@ void DrawMediaPanel(HDC hdc, int width, int height, const ModSettings& settings)
         g_ScrollWait = 60;
         graphics.DrawString(fullText.c_str(), -1, &font, PointF((float)textX, textY), &textBrush);
     }
+
+    graphics.ResetClip();
+
+    int volumePercent = g_VolumeOverlayPercent.load();
+    if (volumePercent >= 0) {
+        volumePercent = min(100, max(0, volumePercent));
+
+        int pillW = min(92, max(64, width / 3));
+        int pillH = min(28, max(22, height - 14));
+        int pillX = width - pillW - 8;
+        int pillY = (height - pillH) / 2;
+        int radius = pillH / 2;
+
+        GraphicsPath volumePath;
+        AddRoundedRect(volumePath, pillX, pillY, pillW, pillH, radius);
+        SolidBrush volumeBg{Color(190, 24, 24, 24)};
+        graphics.FillPath(&volumeBg, &volumePath);
+
+        int barX = pillX + 10;
+        int barY = pillY + pillH - 8;
+        int barW = pillW - 20;
+        int barH = 3;
+        SolidBrush barBg{Color(70, mainColor.GetRed(), mainColor.GetGreen(), mainColor.GetBlue())};
+        SolidBrush barFg{Color(230, mainColor.GetRed(), mainColor.GetGreen(), mainColor.GetBlue())};
+        graphics.FillRectangle(&barBg, barX, barY, barW, barH);
+        graphics.FillRectangle(&barFg, barX, barY, MulDiv(barW, volumePercent, 100), barH);
+
+        WCHAR text[16] = {};
+        swprintf_s(text, L"%d%%", volumePercent);
+        Font volumeFont(g_FontFamily, (REAL)max(10, settings.fontSize), FontStyleBold, UnitPixel);
+        RectF volumeTextRect((REAL)pillX, (REAL)(pillY + 3), (REAL)pillW, (REAL)(pillH - 10));
+        StringFormat format;
+        format.SetAlignment(StringAlignmentCenter);
+        format.SetLineAlignment(StringAlignmentCenter);
+        graphics.DrawString(text, -1, &volumeFont, volumeTextRect, &format, &textBrush);
+    }
 }
 
 // --- Event Hook ---
@@ -1570,6 +1611,7 @@ LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_DESTROY:
             SetAnimationTimerEnabled(hwnd, false);
             KillTimer(hwnd, IDT_VISIBILITY);
+            KillTimer(hwnd, IDT_VOLUME_OVERLAY);
             if (g_TaskbarHook) {
                 UnhookWinEvent(g_TaskbarHook);
                 g_TaskbarHook = nullptr;
@@ -1608,6 +1650,11 @@ LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 } else {
                     SetAnimationTimerEnabled(hwnd, false);
                 }
+            }
+            else if (wParam == IDT_VOLUME_OVERLAY) {
+                KillTimer(hwnd, IDT_VOLUME_OVERLAY);
+                g_VolumeOverlayPercent.store(-1);
+                InvalidateRect(hwnd, NULL, FALSE);
             }
             return 0;
 
@@ -1790,7 +1837,12 @@ LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 }
                 return 0;
             }
-            ChangeActiveMediaSessionVolume(zDelta);
+            int volumePercent = -1;
+            if (ChangeActiveMediaSessionVolume(zDelta, &volumePercent)) {
+                g_VolumeOverlayPercent.store(volumePercent);
+                SetTimer(hwnd, IDT_VOLUME_OVERLAY, 900, NULL);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
             return 0;
         }
         case WM_PAINT: {
