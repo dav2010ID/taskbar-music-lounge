@@ -31,7 +31,9 @@ This fork uses the unique mod id `taskbar-music-deck` to avoid conflicts with ot
 ## Controls
 
 * Left click previous/play/pause/next to control the current media session.
+* Left click album art to open the app that owns the current media session.
 * Scroll over the panel to change the current media app volume.
+* Middle click the panel or use Ctrl+mouse wheel to switch between available media sessions.
 
 For browser playback, volume control usually affects the browser process, such as Chrome, Edge, or Firefox. It does not control a single browser tab.
 
@@ -232,12 +234,14 @@ struct MediaState {
     wstring artist = L"";
     bool isPlaying = false;
     bool hasMedia = false;
+    bool hasSession = false;
     bool canPrevious = false;
     bool canNext = false;
     bool canTogglePlayPause = false;
     wstring sourceAppUserModelId;
     shared_ptr<Bitmap> albumArt;
     uint64_t revision = 0;
+    uint64_t sessionRevision = 0;
     mutex lock;
 } g_MediaState;
 
@@ -382,6 +386,7 @@ PlaybackCapabilities GetPlaybackCapabilities(GlobalSystemMediaTransportControlsS
 
 bool IsMediaStateClearedLocked() {
     return !g_MediaState.hasMedia &&
+        !g_MediaState.hasSession &&
         !g_MediaState.isPlaying &&
         !g_MediaState.canPrevious &&
         !g_MediaState.canNext &&
@@ -396,6 +401,7 @@ void ClearMediaStateLocked(bool incrementRevision) {
     bool changed = !IsMediaStateClearedLocked();
 
     g_MediaState.hasMedia = false;
+    g_MediaState.hasSession = false;
     g_MediaState.isPlaying = false;
     g_MediaState.canPrevious = false;
     g_MediaState.canNext = false;
@@ -407,6 +413,7 @@ void ClearMediaStateLocked(bool incrementRevision) {
 
     if (incrementRevision && changed) {
         g_MediaState.revision++;
+        g_MediaState.sessionRevision++;
     }
 }
 
@@ -415,7 +422,11 @@ void ClearMediaState(bool incrementRevision) {
     ClearMediaStateLocked(incrementRevision);
 }
 
-void UpdateMediaInfo(GlobalSystemMediaTransportControlsSessionManager sessionManager, bool fullUpdate) {
+void UpdateMediaInfo(
+    GlobalSystemMediaTransportControlsSessionManager sessionManager,
+    bool fullUpdate,
+    const wstring& preferredSourceAppUserModelId = L""
+) {
     try {
         if (!sessionManager) return;
 
@@ -424,12 +435,26 @@ void UpdateMediaInfo(GlobalSystemMediaTransportControlsSessionManager sessionMan
         bool foundActive = false;
 
         auto sessionsList = sessionManager.GetSessions();
-        for (auto const& s : sessionsList) {
-            auto pb = s.GetPlaybackInfo();
-            if (pb && pb.PlaybackStatus() == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing) {
-                session = s;
-                foundActive = true;
-                break;
+        if (!preferredSourceAppUserModelId.empty()) {
+            for (auto const& s : sessionsList) {
+                try {
+                    if (wstring(s.SourceAppUserModelId().c_str()) == preferredSourceAppUserModelId) {
+                        session = s;
+                        foundActive = true;
+                        break;
+                    }
+                } catch (...) {}
+            }
+        }
+
+        if (!session) {
+            for (auto const& s : sessionsList) {
+                auto pb = s.GetPlaybackInfo();
+                if (pb && pb.PlaybackStatus() == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing) {
+                    session = s;
+                    foundActive = true;
+                    break;
+                }
             }
         }
 
@@ -457,6 +482,7 @@ void UpdateMediaInfo(GlobalSystemMediaTransportControlsSessionManager sessionMan
 
                 if (!needsFullUpdate) {
                     g_MediaState.isPlaying = newIsPlaying;
+                    g_MediaState.hasSession = true;
                     g_MediaState.canPrevious = capabilities.canPrevious;
                     g_MediaState.canNext = capabilities.canNext;
                     g_MediaState.canTogglePlayPause = capabilities.canTogglePlayPause;
@@ -499,12 +525,16 @@ void UpdateMediaInfo(GlobalSystemMediaTransportControlsSessionManager sessionMan
             g_MediaState.artist = newArtist;
             g_MediaState.isPlaying = newIsPlaying;
             g_MediaState.hasMedia = true;
+            g_MediaState.hasSession = true;
             g_MediaState.canPrevious = capabilities.canPrevious;
             g_MediaState.canNext = capabilities.canNext;
             g_MediaState.canTogglePlayPause = capabilities.canTogglePlayPause;
             g_MediaState.sourceAppUserModelId = newSourceAppUserModelId;
             if (mediaIdentityChanged) {
                 g_MediaState.revision++;
+            }
+            if (mediaIdentityChanged) {
+                g_MediaState.sessionRevision++;
             }
         } else {
             ClearMediaState(true);
@@ -547,11 +577,11 @@ void SendMediaCommand(int cmd) {
     bool canSend = false;
     {
         lock_guard<mutex> guard(g_MediaState.lock);
-        if (!g_MediaState.hasMedia) {
+        if (cmd == 4) {
+            canSend = g_MediaState.hasSession;
+        } else if (!g_MediaState.hasMedia) {
             return;
-        }
-
-        if (cmd == 1) {
+        } else if (cmd == 1) {
             canSend = g_MediaState.canPrevious;
         } else if (cmd == 2) {
             canSend = g_MediaState.canTogglePlayPause;
@@ -610,6 +640,27 @@ wstring ProcessImageNameFromPid(DWORD pid) {
 
     CloseHandle(process);
     return imageName;
+}
+
+wstring ProcessImagePathFromPid(DWORD pid) {
+    if (pid == 0) {
+        return L"";
+    }
+
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+        return L"";
+    }
+
+    WCHAR path[MAX_PATH] = {};
+    DWORD size = ARRAYSIZE(path);
+    wstring imagePath;
+    if (QueryFullProcessImageNameW(process, 0, path, &size)) {
+        imagePath = path;
+    }
+
+    CloseHandle(process);
+    return imagePath;
 }
 
 wstring TakeCoTaskMemString(LPWSTR value) {
@@ -798,6 +849,106 @@ bool ChangeActiveMediaSessionVolume(short wheelDelta) {
     } catch (...) {
         return false;
     }
+}
+
+wstring FindActiveMediaProcessPath(const wstring& sourceAppUserModelId) {
+    if (sourceAppUserModelId.empty()) {
+        return L"";
+    }
+
+    try {
+        winrt::com_ptr<IMMDeviceEnumerator> deviceEnumerator;
+        HRESULT hr = CoCreateInstance(
+            __uuidof(MMDeviceEnumerator),
+            nullptr,
+            CLSCTX_ALL,
+            __uuidof(IMMDeviceEnumerator),
+            deviceEnumerator.put_void()
+        );
+        if (FAILED(hr) || !deviceEnumerator) {
+            return L"";
+        }
+
+        winrt::com_ptr<IMMDevice> endpoint;
+        hr = deviceEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, endpoint.put());
+        if (FAILED(hr) || !endpoint) {
+            return L"";
+        }
+
+        winrt::com_ptr<IAudioSessionManager2> sessionManager;
+        hr = endpoint->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, sessionManager.put_void());
+        if (FAILED(hr) || !sessionManager) {
+            return L"";
+        }
+
+        winrt::com_ptr<IAudioSessionEnumerator> sessionEnumerator;
+        hr = sessionManager->GetSessionEnumerator(sessionEnumerator.put());
+        if (FAILED(hr) || !sessionEnumerator) {
+            return L"";
+        }
+
+        int sessionCount = 0;
+        if (FAILED(sessionEnumerator->GetCount(&sessionCount))) {
+            return L"";
+        }
+
+        for (int i = 0; i < sessionCount; i++) {
+            winrt::com_ptr<IAudioSessionControl> sessionControl;
+            if (FAILED(sessionEnumerator->GetSession(i, sessionControl.put())) || !sessionControl) {
+                continue;
+            }
+
+            winrt::com_ptr<IAudioSessionControl2> sessionControl2;
+            if (FAILED(sessionControl->QueryInterface(__uuidof(IAudioSessionControl2), sessionControl2.put_void())) || !sessionControl2) {
+                continue;
+            }
+
+            if (sessionControl2->IsSystemSoundsSession() == S_OK) {
+                continue;
+            }
+
+            DWORD pid = 0;
+            if (FAILED(sessionControl2->GetProcessId(&pid)) || pid == 0) {
+                continue;
+            }
+
+            wstring processName = ProcessImageNameFromPid(pid);
+            if (AudioSessionMatchesSource(sessionControl2.get(), processName, sourceAppUserModelId)) {
+                return ProcessImagePathFromPid(pid);
+            }
+        }
+    } catch (...) {}
+
+    return L"";
+}
+
+bool OpenActiveMediaApp() {
+    wstring sourceAppUserModelId;
+    {
+        lock_guard<mutex> guard(g_MediaState.lock);
+        if (!g_MediaState.hasSession) {
+            return false;
+        }
+        sourceAppUserModelId = g_MediaState.sourceAppUserModelId;
+    }
+
+    if (sourceAppUserModelId.empty()) {
+        return false;
+    }
+
+    wstring appsFolderTarget = L"shell:AppsFolder\\" + sourceAppUserModelId;
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", appsFolderTarget.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if ((INT_PTR)result > 32) {
+        return true;
+    }
+
+    wstring processPath = FindActiveMediaProcessPath(sourceAppUserModelId);
+    if (!processPath.empty()) {
+        result = ShellExecuteW(nullptr, L"open", processPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return (INT_PTR)result > 32;
+    }
+
+    return false;
 }
 
 // --- Visuals ---
@@ -1062,9 +1213,15 @@ void RefreshVisibility(HWND hwnd) {
     }
 
     bool isPlaying = false;
+    bool hasSession = false;
     {
         lock_guard<mutex> guard(g_MediaState.lock);
         isPlaying = g_MediaState.isPlaying;
+        hasSession = g_MediaState.hasSession;
+    }
+
+    if (!hasSession) {
+        shouldHide = true;
     }
 
     if (settings.idleTimeout > 0) {
@@ -1205,15 +1362,20 @@ LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_MediaUiRefreshPending.store(false);
             {
                 uint64_t mediaRevision = 0;
+                uint64_t sessionRevision = 0;
                 {
                     lock_guard<mutex> guard(g_MediaState.lock);
                     mediaRevision = g_MediaState.revision;
+                    sessionRevision = g_MediaState.sessionRevision;
                 }
 
                 if (mediaRevision != g_LastSeenMediaRevision) {
                     ResetScrollState();
                     SetAnimationTimerEnabled(hwnd, false);
                     g_LastSeenMediaRevision = mediaRevision;
+                }
+                if (sessionRevision != 0 || mediaRevision != 0) {
+                    RefreshVisibility(hwnd);
                 }
             }
             InvalidateRect(hwnd, NULL, FALSE);
@@ -1226,6 +1388,16 @@ LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
             // Merged Logic: Check visibility first
             if (!IsTaskbarUsableForPanel(hTaskbar)) {
+                if (IsWindowVisible(hwnd)) ShowWindow(hwnd, SW_HIDE);
+                return 0;
+            }
+
+            bool hasSession = false;
+            {
+                lock_guard<mutex> guard(g_MediaState.lock);
+                hasSession = g_MediaState.hasSession;
+            }
+            if (!hasSession) {
                 if (IsWindowVisible(hwnd)) ShowWindow(hwnd, SW_HIDE);
                 return 0;
             }
@@ -1322,10 +1494,31 @@ LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             InvalidateRect(hwnd, NULL, FALSE);
             break;
         case WM_LBUTTONUP:
+            {
+                int x = GET_X_LPARAM(lParam);
+                int y = GET_Y_LPARAM(lParam);
+                RECT clientRc;
+                GetClientRect(hwnd, &clientRc);
+                int panelHeight = clientRc.bottom - clientRc.top;
+                int artSize = panelHeight - 12;
+                if (x >= 6 && x <= 6 + artSize && y >= 6 && y <= 6 + artSize) {
+                    OpenActiveMediaApp();
+                    return 0;
+                }
+            }
             if (g_HoverState > 0) SendMediaCommand(g_HoverState);
+            return 0;
+        case WM_MBUTTONUP:
+            SendMediaCommand(4);
             return 0;
         case WM_MOUSEWHEEL: {
             short zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+            if (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) {
+                if (zDelta != 0) {
+                    SendMediaCommand(4);
+                }
+                return 0;
+            }
             ChangeActiveMediaSessionVolume(zDelta);
             return 0;
         }
@@ -1389,8 +1582,11 @@ struct MediaEventsContext {
     event_token sessionsToken{};
     bool hasCurrentSessionToken = false;
     bool hasSessionsToken = false;
+    wstring preferredSourceAppUserModelId;
     vector<MediaSessionSubscription> sessionSubscriptions;
 };
+
+void ProcessMediaRefresh(MediaEventsContext& context);
 
 void ClearMediaSessionSubscriptions(MediaEventsContext& context) {
     for (auto& subscription : context.sessionSubscriptions) {
@@ -1510,6 +1706,44 @@ GlobalSystemMediaTransportControlsSession PickBestSession(GlobalSystemMediaTrans
     }
 }
 
+GlobalSystemMediaTransportControlsSession PickSessionBySourceAppUserModelId(
+    GlobalSystemMediaTransportControlsSessionManager const& manager,
+    const wstring& sourceAppUserModelId
+) {
+    if (!manager || sourceAppUserModelId.empty()) {
+        return nullptr;
+    }
+
+    try {
+        for (auto const& session : manager.GetSessions()) {
+            try {
+                if (wstring(session.SourceAppUserModelId().c_str()) == sourceAppUserModelId) {
+                    return session;
+                }
+            } catch (...) {}
+        }
+    } catch (...) {}
+
+    return nullptr;
+}
+
+GlobalSystemMediaTransportControlsSession PickCommandSession(MediaEventsContext& context) {
+    if (!context.manager) {
+        return nullptr;
+    }
+
+    if (!context.preferredSourceAppUserModelId.empty()) {
+        auto preferredSession = PickSessionBySourceAppUserModelId(context.manager, context.preferredSourceAppUserModelId);
+        if (preferredSession) {
+            return preferredSession;
+        }
+
+        context.preferredSourceAppUserModelId.clear();
+    }
+
+    return PickBestSession(context.manager);
+}
+
 bool IsMediaCommandEnabled(GlobalSystemMediaTransportControlsSession const& session, int cmd) {
     if (!session) {
         return false;
@@ -1533,6 +1767,50 @@ bool IsMediaCommandEnabled(GlobalSystemMediaTransportControlsSession const& sess
     return false;
 }
 
+bool SwitchMediaSession(MediaEventsContext& context) {
+    if (!EnsureMediaEventsInitialized(context) || !context.manager) {
+        return false;
+    }
+
+    try {
+        auto sessions = context.manager.GetSessions();
+        vector<GlobalSystemMediaTransportControlsSession> validSessions;
+        for (auto const& session : sessions) {
+            if (session) {
+                validSessions.push_back(session);
+            }
+        }
+
+        if (validSessions.size() <= 1) {
+            return false;
+        }
+
+        wstring currentSourceAppUserModelId;
+        {
+            lock_guard<mutex> guard(g_MediaState.lock);
+            currentSourceAppUserModelId = g_MediaState.sourceAppUserModelId;
+        }
+
+        int currentIndex = -1;
+        for (int i = 0; i < (int)validSessions.size(); i++) {
+            try {
+                if (wstring(validSessions[i].SourceAppUserModelId().c_str()) == currentSourceAppUserModelId) {
+                    currentIndex = i;
+                    break;
+                }
+            } catch (...) {}
+        }
+
+        int nextIndex = (currentIndex + 1) % (int)validSessions.size();
+        context.preferredSourceAppUserModelId = validSessions[nextIndex].SourceAppUserModelId().c_str();
+        g_NeedFullMediaRefresh.store(true);
+        ProcessMediaRefresh(context);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 void ScheduleMediaCommandVerifyRefresh() {
     if (!g_MediaCommandVerifyTimer) {
         RequestMediaRefresh(false);
@@ -1549,9 +1827,14 @@ void ScheduleMediaCommandVerifyRefresh() {
 void HandleMediaCommand(MediaEventsContext& context, int cmd) {
     bool commandIssued = false;
 
+    if (cmd == 4) {
+        SwitchMediaSession(context);
+        return;
+    }
+
     try {
         if (EnsureMediaEventsInitialized(context)) {
-            auto session = PickBestSession(context.manager);
+            auto session = PickCommandSession(context);
             if (session && IsMediaCommandEnabled(session, cmd)) {
                 if (cmd == 1) session.TrySkipPreviousAsync().get();
                 else if (cmd == 2) session.TryTogglePlayPauseAsync().get();
@@ -1585,7 +1868,7 @@ void ProcessMediaRefresh(MediaEventsContext& context) {
         fullUpdate = true;
     }
 
-    UpdateMediaInfo(context.manager, fullUpdate);
+    UpdateMediaInfo(context.manager, fullUpdate, context.preferredSourceAppUserModelId);
     PostMediaUiRefresh();
 }
 

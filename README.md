@@ -37,9 +37,11 @@ The mod is configured for `explorer.exe` and runs as a Windhawk tool mod. For th
 ## Controls
 
 - Left click previous icon: previous track, if supported by the current media session.
+- Left click album art: open the app that owns the current media session.
 - Left click play/pause icon: toggle playback, if supported.
 - Left click next icon: next track, if supported.
 - Mouse wheel over the panel: change the active media app volume.
+- Middle click the panel or use Ctrl+mouse wheel: switch to the next available media session.
 
 Volume scrolling changes the Windows audio session volume for the app that owns the current GSMTC session. For browser playback, this usually means the browser process such as `chrome.exe`, `msedge.exe`, or `firefox.exe`, not a single YouTube tab. If the matching audio session cannot be found, the system master volume is left unchanged.
 
